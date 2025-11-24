@@ -1,0 +1,52 @@
+# ---------------------------------------
+# Python
+# ---------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.pkl
+
+# Virtual environment
+venv/
+.venv/
+
+# Byte-compiled / optimized / DLL files
+*.so
+*.dll
+*.dylib
+
+# ---------------------------------------
+# Project specific ignores
+# ---------------------------------------
+
+# Ignore cache folder completely
+cache/
+cache/*
+
+# Ignore config folder (or config files)
+config/
+config/*
+
+# If you only want to exclude specific config files:
+# config/*.yaml
+# config/*.json
+# config/*.env
+
+# ---------------------------------------
+# IDE / Editor
+# ---------------------------------------
+.vscode/
+.idea/
+
+# ---------------------------------------
+# Logs
+# ---------------------------------------
+*.log
+
+# ---------------------------------------
+# OS files
+# ---------------------------------------
+.DS_Store
+Thumbs.db
