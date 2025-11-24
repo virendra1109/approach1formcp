@@ -168,7 +168,7 @@
 
 #         return response, thread,input_token,output_token,total_token
 
-"""Orchestrator Agent with Enhanced Debugging and Verification"""
+"""Enhanced Orchestrator with Better Execution Context"""
 from typing import Dict, List, Any, Optional
 from openai import AsyncAzureOpenAI
 from agent_framework import ChatAgent, AgentThread
@@ -182,7 +182,7 @@ from utils.loggers import logger
 
 
 class OrchestratorAgent:
-    """Plans server/tool selection AND executes tasks with enhanced debugging"""
+    """Plans server/tool selection AND executes tasks with enhanced context"""
     
     def __init__(self):
         azure_client = AsyncAzureOpenAI(
@@ -209,12 +209,11 @@ class OrchestratorAgent:
     
     def _extract_channel_from_query(self, query: str) -> Optional[str]:
         """Extract Slack channel name from query"""
-        # Patterns: #channel-name, "to channel-name", "in channel-name"
         patterns = [
-            r'#([\w-]+)',  # #research-updates
-            r'to\s+#?([\w-]+)\s+(?:channel)?',  # to research-updates
-            r'in\s+(?:the\s+)?#?([\w-]+)\s+channel',  # in the dev-team channel
-            r'post\s+(?:to|in)\s+#?([\w-]+)',  # post to research-updates
+            r'#([\w-]+)',  # #channel-name
+            r'to\s+#?([\w-]+)\s+(?:channel)?',  # to channel-name
+            r'in\s+(?:the\s+)?#?([\w-]+)\s+channel',  # in the channel-name channel
+            r'post\s+(?:to|in)\s+#?([\w-]+)',  # post to channel-name
         ]
         
         for pattern in patterns:
@@ -224,8 +223,44 @@ class OrchestratorAgent:
                 logger.info(f"Extracted channel from query: '{channel}'")
                 return channel
         
-        logger.warning("No channel found in query, will use default")
         return None
+    
+    def _build_execution_context(self, query: str, plan: Dict) -> str:
+        """Build enhanced execution instructions based on the plan"""
+        workflow_type = plan.get("metadata", {}).get("workflow_type", "unknown")
+        servers = plan.get("servers", [])
+        target_channel = plan.get("metadata", {}).get("target_channel")
+        
+        context_parts = [query]
+        
+        # Add workflow guidance
+        if workflow_type == "search_and_post" or ("search" in servers and "slack" in servers):
+            context_parts.append(
+                "\n\n[EXECUTION GUIDANCE: This is a search-and-post workflow. "
+                "First use search tools to find actual information, "
+                "then format and post the real findings.]"
+            )
+        elif workflow_type == "retrieve_and_share" or any(s in ["hubspot", "github"] for s in servers):
+            context_parts.append(
+                "\n\n[EXECUTION GUIDANCE: This is a retrieve-and-share workflow. "
+                "First fetch actual data from the service, "
+                "then format and share the real results.]"
+            )
+        
+        # Add channel instruction if present
+        if target_channel:
+            context_parts.append(
+                f"\n\n[TARGET CHANNEL: {target_channel}] "
+                f"When posting to Slack, use channel=\"{target_channel}\" (no # symbol)."
+            )
+        
+        # Add explicit reminder
+        context_parts.append(
+            "\n\n[IMPORTANT: You MUST call the actual tools to retrieve real data. "
+            "Do NOT post example/template content. Use the tools to get actual information.]"
+        )
+        
+        return "".join(context_parts)
     
     async def initialize(self):
         """Initialize agents with current server configuration"""
@@ -284,17 +319,12 @@ class OrchestratorAgent:
 
     async def plan(self, query: str, servers: List[str]) -> tuple[Dict, int, int, int]:
         """Generate plan with servers and tool queries"""
-        logger.info(f"Planning for query: {query}")
+        logger.info(f"\n{'='*70}")
+        logger.info(f"PLANNING PHASE")
+        logger.info(f"Query: {query}")
+        logger.info(f"{'='*70}")
         
-        # Extract channel info early to inform planning
-        channel = self._extract_channel_from_query(query)
-        
-        # Enhance query with channel context if found
-        enhanced_query = query
-        if channel:
-            enhanced_query = f"{query}\n[Target channel: {channel}]"
-        
-        response = await self.planning_agent.run(enhanced_query, tools=[])
+        response = await self.planning_agent.run(query, tools=[])
         usage = getattr(response, "usage_details", None)
 
         input_token1 = getattr(usage, "input_token_count", 0)
@@ -304,16 +334,24 @@ class OrchestratorAgent:
         json_str = self.decode_json(response)
         plan = json.loads(json_str)
         
-        # Add channel to plan metadata if extracted
-        if channel:
-            plan["metadata"] = {"target_channel": channel}
+        # Ensure metadata exists
+        if "metadata" not in plan:
+            plan["metadata"] = {}
         
-        logger.info(f"PLAN GENERATED:")
-        logger.info(f"   Servers: {', '.join(plan['servers'])}")
+        # Extract channel if not already in plan
+        if "target_channel" not in plan["metadata"]:
+            channel = self._extract_channel_from_query(query)
+            if channel:
+                plan["metadata"]["target_channel"] = channel
+        
+        logger.info(f"\nPLAN GENERATED:")
+        logger.info(f"  Servers: {', '.join(plan['servers'])}")
+        logger.info(f"  Workflow: {plan['metadata'].get('workflow_type', 'unknown')}")
+        if plan["metadata"].get("target_channel"):
+            logger.info(f"  Target Channel: {plan['metadata']['target_channel']}")
         for srv, tq in plan['tool_queries'].items():
-            logger.info(f"   • {srv}: '{tq}'")
-        if channel:
-            logger.info(f"   Target Channel: {channel}")
+            logger.info(f"  • {srv}: '{tq}'")
+        logger.info(f"{'='*70}\n")
         
         return plan, input_token1, output_token1, total_token1
     
@@ -324,56 +362,64 @@ class OrchestratorAgent:
         thread: Optional[AgentThread] = None,
         plan: Optional[Dict] = None
     ) -> tuple[Any, AgentThread, int, int, int]:
-        """Execute query with filtered tools using thread for context"""
-        logger.info(f"EXECUTING with {len(tools)} tools")
+        """Execute query with enhanced context and verification"""
+        logger.info(f"\n{'='*70}")
+        logger.info(f"EXECUTION PHASE")
+        logger.info(f"Tools available: {len(tools)}")
+        logger.info(f"{'='*70}")
         
-        # Extract channel from query for execution context
-        channel = self._extract_channel_from_query(query)
-        
-        # Enhance query with explicit channel instruction
-        enhanced_query = query
-        if channel:
-            enhanced_query = f"""{query}
-
-CRITICAL INSTRUCTION: The target Slack channel is "{channel}" (without # symbol).
-When posting to Slack, you MUST use channel="{channel}" in the tool call.
-DO NOT use any other channel name."""
-            logger.info(f"Enhanced query with channel instruction: {channel}")
+        # Build execution context with plan information
+        if plan:
+            execution_query = self._build_execution_context(query, plan)
+            logger.info(f"\nEnhanced query with context:")
+            logger.info(execution_query)
+        else:
+            execution_query = query
         
         if thread is None:
             thread = self.execution_agent.get_new_thread()
         
-        # Log available tools
-        logger.info("Available tools for execution:")
+        # Log available tools for debugging
+        logger.info("\nAvailable tools:")
         for tool in tools:
             tool_name = getattr(tool, 'name', 'unknown')
             logger.info(f"  - {tool_name}")
         
+        # Execute
         response = await self.execution_agent.run(
-            enhanced_query, 
+            execution_query, 
             tools=tools, 
             thread=thread
         )
         
-        # Log execution details
-        self._log_execution_details(response)
+        # Detailed logging
+        self._log_execution_details(response, plan)
         
         usage = getattr(response, "usage_details", None)
         input_token = getattr(usage, "input_token_count", 0)
         output_token = getattr(usage, "output_token_count", 0)
         total_token = getattr(usage, "total_token_count", 0)
 
+        logger.info(f"\n{'='*70}")
+        logger.info(f"EXECUTION COMPLETE")
+        logger.info(f"{'='*70}\n")
+
         return response, thread, input_token, output_token, total_token
     
-    def _log_execution_details(self, response):
-        """Log detailed execution information"""
+    def _log_execution_details(self, response, plan: Optional[Dict] = None):
+        """Log detailed execution information with plan verification"""
         try:
+            expected_channel = plan.get("metadata", {}).get("target_channel") if plan else None
+            tool_calls_found = False
+            slack_posts = []
+            
             if hasattr(response, 'messages'):
                 for msg in response.messages:
                     role = getattr(msg, 'role', 'unknown')
                     
                     # Log tool calls
                     if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        tool_calls_found = True
                         logger.info(f"\n{'='*60}")
                         logger.info(f"TOOL CALLS FROM {role.upper()}:")
                         for tc in msg.tool_calls:
@@ -382,21 +428,47 @@ DO NOT use any other channel name."""
                             logger.info(f"\n  Tool: {tool_name}")
                             logger.info(f"  Arguments: {json.dumps(tool_args, indent=4)}")
                             
-                            # Special attention to Slack calls
-                            if 'slack' in tool_name.lower() or 'post' in tool_name.lower():
+                            # Track Slack posts
+                            if 'slack' in tool_name.lower() and 'post' in tool_name.lower():
+                                slack_posts.append(tool_args)
                                 logger.warning(f"  ⚠️  SLACK POST DETECTED")
-                                if 'channel' in tool_args:
-                                    logger.warning(f"  Channel used: '{tool_args['channel']}'")
-                                else:
-                                    logger.error(f"  ❌ NO CHANNEL SPECIFIED!")
+                                channel_used = tool_args.get('channel', 'NOT SPECIFIED')
+                                logger.warning(f"  Channel: '{channel_used}'")
+                                
+                                # Verify channel matches expectation
+                                if expected_channel and channel_used != expected_channel:
+                                    logger.error(
+                                        f"  ❌ CHANNEL MISMATCH! "
+                                        f"Expected: '{expected_channel}', Used: '{channel_used}'"
+                                    )
+                                elif expected_channel:
+                                    logger.info(f"  ✓ Channel matches expected: '{expected_channel}'")
+                        
                         logger.info(f"{'='*60}\n")
-                    
-                    # Log content
-                    if hasattr(msg, 'content') and msg.content:
-                        content = str(msg.content)
-                        if len(content) > 200:
-                            logger.info(f"{role}: {content[:200]}...")
-                        else:
-                            logger.info(f"{role}: {content}")
+            
+            # Verification summary
+            if plan:
+                workflow = plan.get("metadata", {}).get("workflow_type", "unknown")
+                requires_search = "search" in workflow or any("search" in s for s in plan.get("servers", []))
+                requires_slack = "slack" in plan.get("servers", [])
+                
+                logger.info("\n=== EXECUTION VERIFICATION ===")
+                logger.info(f"Workflow type: {workflow}")
+                logger.info(f"Tool calls made: {tool_calls_found}")
+                
+                if requires_search and not tool_calls_found:
+                    logger.error("❌ PROBLEM: Workflow requires search but no tools were called!")
+                
+                if requires_slack:
+                    if slack_posts:
+                        logger.info(f"✓ Slack posts made: {len(slack_posts)}")
+                        for i, post in enumerate(slack_posts, 1):
+                            logger.info(f"  Post {i}: channel='{post.get('channel')}', "
+                                      f"length={len(str(post.get('text', '')))} chars")
+                    else:
+                        logger.error("❌ PROBLEM: Workflow requires Slack post but none were made!")
+                
+                logger.info("=" * 30 + "\n")
+                
         except Exception as e:
             logger.error(f"Error logging execution details: {e}")
